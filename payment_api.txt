@@ -1,0 +1,132 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import time
+import requests
+import base64
+
+# Initialize the Flask application
+app = Flask(__name__)
+CORS(app)  # Enable CORS to allow requests from the client-side app
+
+# --- Important: Replace these with your actual PayPal API credentials ---
+# You can get these from your PayPal Developer Dashboard
+PAYPAL_CLIENT_ID = 'AdodMyMMKGdr5pM5B6tEGzoaZ-UWjUuOfGiusWWiQks-ylw0nHSg-uX-LO-sPd4Jq2CrkToJZyicL3h2'
+PAYPAL_SECRET = 'ENnO69YppZ5jeDbuwMIa7FROG09U7uux0HIXBE5QZlM_hEMdCHdWgn3xj-lY3am6aBYyf6G5BXZLGsqd'
+
+# PayPal API base URL (for sandbox testing)
+PAYPAL_API_BASE = 'https://api-m.paypal.com'
+
+# --- Utility Function for PayPal Authentication ---
+def get_paypal_access_token():
+    """
+    Authenticates with the PayPal API using client credentials.
+    Returns a valid access token.
+    """
+    auth = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_SECRET}".encode()).decode()
+    headers = {
+        'Accept': 'application/json',
+        'Accept-Language': 'en_US',
+        'Authorization': f'Basic {auth}'
+    }
+    data = {'grant_type': 'client_credentials'}
+    
+    try:
+        response = requests.post(f'{PAYPAL_API_BASE}/v1/oauth2/token', headers=headers, data=data)
+        response.raise_for_status()
+        return response.json()['access_token']
+    except requests.exceptions.RequestException as e:
+        print(f"Error getting PayPal access token: {e}")
+        return None
+
+# --- API Endpoint to Create a PayPal Order ---
+@app.route('/create-paypal-order', methods=['POST'])
+def create_paypal_order():
+    """
+    Creates a new PayPal order. The client will use the order ID
+    to open the PayPal payment window.
+    """
+    data = request.get_json()
+    tier = data.get('tier')
+    
+    if tier == 'starter':
+        price = "0.99"
+        product_name = "Starter Vibe Check Subscription"
+    elif tier == 'unlimited':
+        price = "3.00"
+        product_name = "Unlimited Vibe Check Subscription"
+    else:
+        return jsonify({"success": False, "message": "Invalid subscription tier."}), 400
+
+    access_token = get_paypal_access_token()
+    if not access_token:
+        return jsonify({"success": False, "message": "Could not authenticate with PayPal."}), 500
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {access_token}'
+    }
+
+    payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [{
+            "items": [{
+                "name": product_name,
+                "quantity": "1",
+                "unit_amount": {
+                    "currency_code": "USD",
+                    "value": price
+                }
+            }],
+            "amount": {
+                "currency_code": "USD",
+                "value": price
+            }
+        }],
+    }
+
+    try:
+        response = requests.post(f'{PAYPAL_API_BASE}/v2/checkout/orders', headers=headers, json=payload)
+        response.raise_for_status()
+        return jsonify(response.json()), 201
+    except requests.exceptions.RequestException as e:
+        print(f"Error creating PayPal order: {e.response.text if e.response else e}")
+        return jsonify({"success": False, "message": "Failed to create PayPal order."}), 500
+
+# --- API Endpoint to Capture the Payment ---
+@app.route('/capture-paypal-order', methods=['POST'])
+def capture_paypal_order():
+    """
+    Captures the payment for a given PayPal order ID.
+    This is called by the client after the user approves the payment.
+    """
+    data = request.get_json()
+    order_id = data.get('orderID')
+    tier = data.get('tier')
+    user_id = data.get('userId')
+
+    if not order_id or not tier or not user_id:
+        return jsonify({"success": False, "message": "Missing order ID, tier, or user ID."}), 400
+
+    access_token = get_paypal_access_token()
+    if not access_token:
+        return jsonify({"success": False, "message": "Could not authenticate with PayPal."}), 500
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {access_token}'
+    }
+
+    try:
+        response = requests.post(f'{PAYPAL_API_BASE}/v2/checkout/orders/{order_id}/capture', headers=headers)
+        response.raise_for_status()
+        
+        # In a real application, you would save the user's subscription
+        # status and other payment details to your database here.
+        
+        return jsonify({"success": True, "message": "Payment captured successfully.", "subscriptionStatus": tier}), 200
+    except requests.exceptions.RequestException as e:
+        print(f"Error capturing PayPal order: {e.response.text if e.response else e}")
+        return jsonify({"success": False, "message": "Failed to capture payment."}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
